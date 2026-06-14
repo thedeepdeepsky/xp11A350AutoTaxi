@@ -1,0 +1,12 @@
+[ 28%] Building CXX object CMakeFiles/A350AutoTaxi.dir/src/AutoTaxiUI.cpp.o
+[ 28%] Building CXX object CMakeFiles/A350AutoTaxi.dir/src/Plugin.cpp.o
+[ 42%] Building CXX object CMakeFiles/A350AutoTaxi.dir/src/AutoTaxi.cpp.o
+[ 57%] Building CXX object CMakeFiles/A350AutoTaxi.dir/src/AptDatParser.cpp.o
+[ 71%] Building CXX object CMakeFiles/A350AutoTaxi.dir/src/Config.cpp.o
+[ 85%] Building CXX object CMakeFiles/A350AutoTaxi.dir/src/Geo.cpp.o
+[100%] Linking CXX shared module A350AutoTaxi/64/lin.xpl
+/usr/bin/ld: cannot find -lGL: No such file or directory
+collect2: error: ld returned 1 exit status
+gmake[2]: *** [CMakeFiles/A350AutoTaxi.dir/build.make:181: A350AutoTaxi/64/lin.xpl] Error 1
+gmake[1]: *** [CMakeFiles/Makefile2:87: CMakeFiles/A350AutoTaxi.dir/all] Error 2
+gmake: *** [Makefile:91: all] Error 2
