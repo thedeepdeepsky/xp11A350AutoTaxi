@@ -74,8 +74,8 @@ struct AutoTaxiConfig {
     double pidHeadingKd = 0.26;
     double pidIntegralLimitDegSec = 45.0;
     double pidDerivativeFilterSec = 0.55;
-    double pidCrossTrackGainDegPerM = 0.08;
-    double pidCrossTrackMaxDeg = 10.0;
+    double pidCrossTrackGainDegPerM = 0.16;
+    double pidCrossTrackMaxDeg = 16.0;
     double maxTrackCaptureAngleDeg = 88.0;
 
     // Fast route-capture mode for startup/off-track cases.
@@ -87,8 +87,8 @@ struct AutoTaxiConfig {
     double fastCaptureStartSeconds = 28.0;
     double fastCaptureThresholdM = 5.0;
     double fastCaptureHardThresholdM = 18.0;
-    double fastCaptureGainDegPerM = 0.55;
-    double fastCaptureMaxBiasDeg = 42.0;
+    double fastCaptureGainDegPerM = 0.85;
+    double fastCaptureMaxBiasDeg = 48.0;
     double fastCaptureKpBoost = 1.30;
     double fastCaptureKdBoost = 1.45;
     double fastCaptureSteerFullDeflectionDeg = 45.0;
@@ -131,6 +131,24 @@ struct AutoTaxiConfig {
     double microAnticipateTowardSteerThreshold = 0.015;
     double microAnticipateDirectBlend = 1.0;
     double microAnticipatePidReturnDeg = 12.0;
+
+    // Track-course controller. This directly follows the current taxiway leg heading
+    // plus a Stanley/L1-style cross-track intercept angle. It reacts as soon as XTE
+    // appears, not only after the look-ahead point has moved far enough. When the nose
+    // is already cutting back toward the centerline it reduces/reverses the effective
+    // XTE before zero, so the tiller begins to unwind before the aircraft crosses the line.
+    bool trackCourseControl = true;
+    double trackCourseBlend = 0.92;
+    double trackCourseLookaheadM = 16.0;
+    double trackCourseSpeedGainMPerKt = 0.55;
+    double trackCourseGain = 1.55;
+    double trackCourseMaxInterceptDeg = 38.0;
+    double trackCoursePrezeroBandM = 11.0;
+    double trackCoursePrezeroLeadSec = 5.6;
+    double trackCoursePrezeroPower = 2.30;
+    double trackCoursePrezeroMinHeadingDeg = 0.10;
+    double trackCoursePrezeroCounterM = 7.0;
+    double trackCourseTightTurnFade = 0.85;
 
     // Corner anticipation makes the taxi controller behave more like an AP lateral mode:
     // it starts blending toward the next leg before the nose reaches the node, instead of

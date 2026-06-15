@@ -1557,8 +1557,69 @@ void AutoTaxiSystem::updateControl(double dt) {
     const double maxXteBiasDeg = normalMaxBias + captureBlend * (fastMaxBias - normalMaxBias);
     const double xteBiasDeg = clamp(xteForControlM * xteGain, -maxXteBiasDeg, maxXteBiasDeg);
 
-    double headingErr = geo::diffSignedDeg(geo::normalize360(track.desiredTrackDeg + xteBiasDeg), psi);
-    if (microLeadBlend > 0.0 && std::abs(headingErr) < std::max(0.0, cfg_.microAnticipateDeadbandDeg)) {
+    const double lookaheadHeadingErr =
+        geo::diffSignedDeg(geo::normalize360(track.desiredTrackDeg + xteBiasDeg), psi);
+
+    // Direct track-course capture. The older controller mainly aimed at a look-ahead
+    // point; on a long straight this can wait until XTE is already several metres away
+    // before producing meaningful tiller. Here we command the current taxiway course
+    // plus a Stanley/L1-style intercept angle from XTE. This starts steering back as
+    // soon as XTE exists. When the aircraft is already cutting toward the centerline,
+    // we deliberately soften or reverse the effective XTE before it reaches zero, so
+    // the tiller starts returning before the map value crosses 0.0 m.
+    double courseHeadingErr = lookaheadHeadingErr;
+    double trackCoursePrezeroBlend = 0.0;
+    if (cfg_.trackCourseControl) {
+        double courseXteM = xteForControlM;
+        const double courseBand = std::max(0.5, cfg_.trackCoursePrezeroBandM);
+        const double courseLeadSec = std::max(0.0, cfg_.trackCoursePrezeroLeadSec);
+        const double rateWeight = clamp(cfg_.microAnticipateGeomRateWeight, 0.0, 1.0);
+        const double blendedRate = xteRateMps * (1.0 - rateWeight) + geomXteRateMps * rateWeight;
+        const bool headingTowardCenter = (xteM * geomXteRateMps) < 0.0;
+        const bool closeEnoughForRollout = xteAbsM <= courseBand;
+        const bool meaningfulHeading =
+            std::abs(pathHeadingErrForLead) >= std::max(0.0, cfg_.trackCoursePrezeroMinHeadingDeg);
+
+        if (closeEnoughForRollout && headingTowardCenter && meaningfulHeading) {
+            const double bandT = clamp(1.0 - xteAbsM / courseBand, 0.0, 1.0);
+            const double absScale = std::pow(clamp(xteAbsM / courseBand, 0.0, 1.0),
+                                             std::max(0.35, cfg_.trackCoursePrezeroPower));
+            const double softened = std::copysign(xteAbsM * absScale, xteM);
+
+            double predicted = xteM + blendedRate * courseLeadSec;
+            const double maxLead = std::max(courseBand, cfg_.predictiveXteMaxLeadM);
+            predicted = clamp(predicted, -maxLead, maxLead);
+
+            const double headingT = clamp(std::abs(pathHeadingErrForLead) / 8.0, 0.0, 1.0);
+            const double counterBias = std::copysign(std::max(0.0, cfg_.trackCoursePrezeroCounterM) *
+                                                     bandT * headingT, xteM);
+            const double prezero = predicted - counterBias;
+
+            // Pick the most conservative-to-center value: it must never be larger in
+            // magnitude than current XTE when we are already moving toward the line.
+            courseXteM = softened;
+            if (std::abs(prezero) < std::abs(courseXteM) || prezero * xteM < 0.0) {
+                courseXteM = prezero;
+            }
+            trackCoursePrezeroBlend = bandT;
+            xteForControlM = courseXteM;
+        }
+
+        const double interceptDistM = std::max(6.0, cfg_.trackCourseLookaheadM +
+            gsKts * std::max(0.0, cfg_.trackCourseSpeedGainMPerKt));
+        const double interceptDeg = clamp(
+            geo::rad2deg(std::atan2(courseXteM * std::max(0.05, cfg_.trackCourseGain), interceptDistM)),
+            -std::max(2.0, cfg_.trackCourseMaxInterceptDeg),
+             std::max(2.0, cfg_.trackCourseMaxInterceptDeg));
+        courseHeadingErr = geo::diffSignedDeg(geo::normalize360(track.pathHeadingDeg + interceptDeg), psi);
+    }
+
+    const double courseFade = 1.0 - clamp(tightTurnBlend * clamp(cfg_.trackCourseTightTurnFade, 0.0, 1.0), 0.0, 1.0);
+    const double courseBlend = clamp(cfg_.trackCourseBlend, 0.0, 1.0) * courseFade;
+    double headingErr = lookaheadHeadingErr * (1.0 - courseBlend) + courseHeadingErr * courseBlend;
+    headingErr = clamp(headingErr, -180.0, 180.0);
+    if ((microLeadBlend > 0.0 || trackCoursePrezeroBlend > 0.0) &&
+        std::abs(headingErr) < std::max(0.0, cfg_.microAnticipateDeadbandDeg)) {
         headingErr = 0.0;
     }
     const double outboundHeadingErr = outboundHeadingValid ? geo::diffSignedDeg(outboundHeadingDeg, psi) : 0.0;
@@ -1673,7 +1734,7 @@ void AutoTaxiSystem::updateControl(double dt) {
     lastPidOutputDeg_ = pidOutputDeg;
 
     double targetSteer = 0.0;
-    const double activeSteerDeadbandDeg = microLeadBlend > 0.0
+    const double activeSteerDeadbandDeg = (microLeadBlend > 0.0 || trackCoursePrezeroBlend > 0.0)
         ? std::min(cfg_.steerDeadbandDeg, std::max(0.0, cfg_.microAnticipateDeadbandDeg))
         : cfg_.steerDeadbandDeg;
     if (std::abs(pidOutputDeg) >= activeSteerDeadbandDeg) {
@@ -1728,7 +1789,8 @@ void AutoTaxiSystem::updateControl(double dt) {
                                        tightSmoothingPerSec});
 
     const bool fastSteerDemand = cfg_.steerFastResponse &&
-        (tightTurnBlend > 0.05 || captureBlend > 0.10 || microLeadBlend > 0.10 || microReturnBlend > 0.05 ||
+        (tightTurnBlend > 0.05 || captureBlend > 0.10 || microLeadBlend > 0.10 ||
+         microReturnBlend > 0.05 || trackCoursePrezeroBlend > 0.05 ||
          std::abs(pidOutputDeg) >= std::max(1.0, cfg_.steerFastResponseErrorDeg) ||
          std::abs(xteForControlM) >= std::max(0.1, cfg_.steerFastResponseXteM));
     if (fastSteerDemand) {
