@@ -1824,9 +1824,16 @@ void AutoTaxiSystem::updateControl(double dt) {
         // left of the selected runway centreline, bias the desired heading right of
         // runway heading; if it is right, bias left. As the aircraft gets closer to
         // the threshold/route end this overrides taxi-route tracking.
-        const double centreInterceptDeg = clamp(-runwaySignedXteM * std::max(0.0, cfg_.runwayAlignCenterGainDegPerM),
-                                                -std::max(1.0, cfg_.runwayAlignMaxInterceptDeg),
-                                                 std::max(1.0, cfg_.runwayAlignMaxInterceptDeg));
+        // Positive runwaySignedXteM means the aircraft is left of the selected
+        // runway centreline when looking down the runway direction. Positive
+        // heading/steer command in this plugin convention turns right, so a
+        // positive XTE must create a positive centreline intercept. The previous
+        // full-steer/runway-align build used the opposite sign here, which could
+        // make runway destinations steer away from the centreline and look like
+        // the whole turn direction was reversed.
+        const double centreInterceptDeg = clamp(runwaySignedXteM * std::max(0.0, cfg_.runwayAlignCenterGainDegPerM),
+                                               -std::max(1.0, cfg_.runwayAlignMaxInterceptDeg),
+                                                std::max(1.0, cfg_.runwayAlignMaxInterceptDeg));
         const double desiredRunwayDeg = geo::normalize360(runwayHeadingDeg + centreInterceptDeg);
         const double runwayErr = geo::diffSignedDeg(desiredRunwayDeg, psi);
         const double blend = clamp(runwayAlignBlend, 0.0, 1.0);
@@ -2064,13 +2071,39 @@ void AutoTaxiSystem::updateControl(double dt) {
         smoothingPerSec = std::max(smoothingPerSec, std::max(1.0, cfg_.tightTurnSteerSmoothingPerSec));
     }
 
+    auto signedUnit = [](double v, double eps) -> double {
+        return std::abs(v) > eps ? std::copysign(1.0, v) : 0.0;
+    };
+
+    // One authoritative sign source for all hard-turn overrides.  The normal PID
+    // path has the known-good sign convention because it is the same value that is
+    // mapped into targetSteer.  The previous full-steer build guessed the sign from
+    // outboundHeadingErr/upcomingTurnSign in a separate path; when route-track,
+    // tight-lookahead, or runway-align were active, that could fight the controller
+    // and command full steer in the opposite direction.  Always prefer the existing
+    // controller sign, then fall back gradually to heading errors only if the
+    // controller is still near zero.
+    auto controllerTurnSide = [&]() -> double {
+        double s = signedUnit(targetSteer, 0.015);
+        if (s != 0.0) return s;
+        s = signedUnit(pidOutputDeg, 0.8);
+        if (s != 0.0) return s;
+        s = signedUnit(headingErr, 0.8);
+        if (s != 0.0) return s;
+        s = signedUnit(lookaheadHeadingErr, 0.8);
+        if (s != 0.0) return s;
+        s = signedUnit(courseHeadingErr, 0.8);
+        if (s != 0.0) return s;
+        s = signedUnit(outboundHeadingErr, 2.0);
+        if (s != 0.0) return s;
+        return upcomingTurnSign;
+    };
+
     // Absolute force-full-turn command. This is intentionally stronger than the
     // existing snap floor: for large turns it sets the smoothed command immediately
     // to full tiller, so there is no slow ramp through 0.2/0.4/0.6 first.
     if (forceFullTurnActive && outboundHeadingValid) {
-        double turnSide = std::abs(outboundHeadingErr) > 2.0
-            ? std::copysign(1.0, outboundHeadingErr)
-            : upcomingTurnSign;
+        const double turnSide = controllerTurnSide();
         if (turnSide != 0.0) {
             const double ratio = clamp(cfg_.tightTurnForceFullSteerRatio, 0.05, 1.0);
             targetSteer = turnSide * ratio;
@@ -2086,9 +2119,7 @@ void AutoTaxiSystem::updateControl(double dt) {
     if (cfg_.earlyTurnTakeover && earlyTurnBlend > 0.0 && hardOnePassTurn && outboundHeadingValid) {
         const double rolloutBand = std::max(4.0, cfg_.tightTurnRolloutHeadingDeg);
         const bool rolloutSoon = std::abs(outboundHeadingErr) < rolloutBand;
-        double turnSide = std::abs(outboundHeadingErr) > 2.0
-            ? std::copysign(1.0, outboundHeadingErr)
-            : upcomingTurnSign;
+        const double turnSide = controllerTurnSide();
         if (!rolloutSoon && turnSide != 0.0) {
             const double snapTo = clamp(cfg_.earlyTurnSnapToRatio, 0.0, 1.0);
             const double minFloor = clamp(cfg_.earlyTurnSnapMinTargetRatio, 0.0, snapTo);
@@ -2238,8 +2269,13 @@ void AutoTaxiSystem::updateControl(double dt) {
         std::abs(pidOutputDeg) > cfg_.differentialBrakeThresholdDeg) {
         const double diff = diffBrakeMax *
             clamp((std::abs(pidOutputDeg) - cfg_.differentialBrakeThresholdDeg) / 45.0, 0.0, 1.0);
-        if (pidOutputDeg > 0.0) rightBrake = clamp(rightBrake + diff, 0.0, cfg_.maxBrake);
-        else leftBrake = clamp(leftBrake + diff, 0.0, cfg_.maxBrake);
+        // Use the actual steering command sign for brake side selection. During
+        // forced full-steer turns, pidOutputDeg can be capped/rolled out while the
+        // hard steering override is active; using the steering command keeps brake
+        // assist on the same side as the commanded turn instead of fighting it.
+        const double brakeSide = std::abs(smoothedSteer_) > 0.03 ? smoothedSteer_ : targetSteer;
+        if (brakeSide > 0.0) rightBrake = clamp(rightBrake + diff, 0.0, cfg_.maxBrake);
+        else if (brakeSide < 0.0) leftBrake = clamp(leftBrake + diff, 0.0, cfg_.maxBrake);
     }
 
     if (stuckBoostActive) {
