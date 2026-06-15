@@ -1446,12 +1446,19 @@ void AutoTaxiSystem::updateControl(double dt) {
     // Force-full-turn arming. This bypasses the slow blend/rate-limit path for
     // large upcoming corners; the steer command will be snapped directly to full
     // tiller later, until the nose is close enough to outbound heading to roll out.
+    const double forceFullArmDistanceM = std::max(20.0, cfg_.tightTurnForceFullSteerDistanceM);
     const bool forceFullTurnWindow = !terminalGuardActive && cfg_.tightTurnForceFullSteer &&
         outboundHeadingValid && upcomingTurnAngleDeg >= std::max(1.0, cfg_.tightTurnForceFullSteerAngleDeg) &&
-        track.distanceToSegmentEndM <= std::max(20.0, cfg_.tightTurnForceFullSteerDistanceM);
+        track.distanceToSegmentEndM <= forceFullArmDistanceM;
     const bool forceFullTurnRollout = forceFullTurnWindow &&
         std::abs(outboundHeadingErrForTurn) <= std::max(3.0, cfg_.tightTurnForceFullReleaseHeadingDeg);
     const bool forceFullTurnActive = forceFullTurnWindow && !forceFullTurnRollout;
+    const bool largeTurnPreFullWindow = !terminalGuardActive && cfg_.tightTurnForceFullSteer &&
+        outboundHeadingValid && upcomingTurnAngleDeg >= std::max(1.0, cfg_.tightTurnForceFullSteerAngleDeg) &&
+        track.distanceToSegmentEndM > forceFullArmDistanceM &&
+        track.distanceToSegmentEndM <= std::max(forceFullArmDistanceM + 5.0, cfg_.tightTurnTriggerDistanceM);
+    const double preFullSteerCapRatio = clamp(cfg_.tightTurnPreFullSteerCapRatio, 0.05, 0.98);
+    const double preFullSnapMinRatio = clamp(cfg_.tightTurnPreFullSnapMinRatio, 0.0, preFullSteerCapRatio);
 
     // Early hard-turn takeover. The direct track-course controller intentionally holds
     // the current taxiway centerline on straight legs, but before a 70-100 degree corner
@@ -2075,6 +2082,13 @@ void AutoTaxiSystem::updateControl(double dt) {
         return std::abs(v) > eps ? std::copysign(1.0, v) : 0.0;
     };
 
+    // While approaching a large turn but still outside the near-apex full-tiller
+    // window, keep anticipation modest. This prevents the earlier route-track/tight
+    // turn logic from commanding full steering hundreds of metres before the node.
+    if (largeTurnPreFullWindow && !forceFullTurnActive) {
+        targetSteer = clamp(targetSteer, -preFullSteerCapRatio, preFullSteerCapRatio);
+    }
+
     // One authoritative sign source for all hard-turn overrides.  The normal PID
     // path has the known-good sign convention because it is the same value that is
     // mapped into targetSteer.  The previous full-steer build guessed the sign from
@@ -2121,8 +2135,15 @@ void AutoTaxiSystem::updateControl(double dt) {
         const bool rolloutSoon = std::abs(outboundHeadingErr) < rolloutBand;
         const double turnSide = controllerTurnSide();
         if (!rolloutSoon && turnSide != 0.0) {
-            const double snapTo = clamp(cfg_.earlyTurnSnapToRatio, 0.0, 1.0);
-            const double minFloor = clamp(cfg_.earlyTurnSnapMinTargetRatio, 0.0, snapTo);
+            double snapTo = clamp(cfg_.earlyTurnSnapToRatio, 0.0, 1.0);
+            double minFloor = clamp(cfg_.earlyTurnSnapMinTargetRatio, 0.0, snapTo);
+            if (!forceFullTurnActive) {
+                // Early-turn takeover may blend the heading toward the outbound leg, but
+                // it must not become a de-facto full-tiller command before the 50-60 m
+                // near-apex full-steer gate.
+                snapTo = std::min(snapTo, preFullSteerCapRatio);
+                minFloor = std::min(minFloor, preFullSnapMinRatio);
+            }
             const double snapFloor = clamp(minFloor * earlyTurnBlend, 0.0, snapTo);
             if (snapFloor > 0.0 && (targetSteer * turnSide < snapFloor)) {
                 targetSteer = turnSide * std::max(std::abs(targetSteer), snapFloor);
@@ -2138,8 +2159,19 @@ void AutoTaxiSystem::updateControl(double dt) {
         double snapMinTarget = std::max(0.0, cfg_.tightTurnSnapMinTargetRatio);
         double snapFloor = 0.0;
         if (hardOnePassTurn) {
-            snapTo = std::max(snapTo, clamp(cfg_.tightTurnHardSnapToRatio, 0.0, 1.0));
-            snapFloor = clamp(cfg_.tightTurnHardSnapMinTargetRatio, 0.0, snapTo);
+            if (forceFullTurnActive) {
+                snapTo = std::max(snapTo, clamp(cfg_.tightTurnHardSnapToRatio, 0.0, 1.0));
+                snapFloor = clamp(cfg_.tightTurnHardSnapMinTargetRatio, 0.0, snapTo);
+            } else {
+                // Hard one-pass mode is allowed to prepare the turn, but the actual
+                // full-tiller snap is held back until tightTurnForceFullSteerDistanceM.
+                snapTo = std::min(snapTo, preFullSteerCapRatio);
+                snapMinTarget = std::min(snapMinTarget, preFullSnapMinRatio);
+                snapFloor = preFullSnapMinRatio;
+            }
+        } else if (largeTurnPreFullWindow) {
+            snapTo = std::min(snapTo, preFullSteerCapRatio);
+            snapMinTarget = std::min(snapMinTarget, preFullSnapMinRatio);
         }
 
         // Do not hard-snap during rollout; once the outbound heading is nearly captured,

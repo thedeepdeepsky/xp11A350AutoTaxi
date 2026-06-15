@@ -176,30 +176,37 @@ struct AutoTaxiConfig {
     // a snap-to-tiller command before the nose reaches the intersection.
     bool earlyTurnTakeover = true;
     double earlyTurnTakeoverAngleDeg = 50.0;
-    double earlyTurnTakeoverDistanceM = 240.0;
-    double earlyTurnFullDistanceM = 170.0;
-    double earlyTurnMinBlend = 0.55;
-    double earlyTurnHeadingBlend = 1.00;
-    double earlyTurnTrackCourseFade = 1.0;
-    double earlyTurnSnapToRatio = 1.00;
-    double earlyTurnSnapMinTargetRatio = 0.98;
+    double earlyTurnTakeoverDistanceM = 135.0;
+    double earlyTurnFullDistanceM = 55.0;
+    double earlyTurnMinBlend = 0.18;
+    double earlyTurnHeadingBlend = 0.60;
+    double earlyTurnTrackCourseFade = 0.55;
+    double earlyTurnSnapToRatio = 0.45;
+    double earlyTurnSnapMinTargetRatio = 0.12;
 
     // Hard snap for large upcoming turns. When a 70-100 degree corner is close,
     // do not ramp the steering command. Force full tiller immediately and let the
     // one-pass rollout logic release it only near the outbound heading.
     bool tightTurnForceFullSteer = true;
     double tightTurnForceFullSteerAngleDeg = 65.0;
-    double tightTurnForceFullSteerDistanceM = 190.0;
+    // Full tiller is intentionally delayed until close to the corner apex.
+    // FAA/ICAO taxiway design assumes cockpit-over-centreline turning and fillet/radius
+    // geometry, not a long full-tiller cut-in hundreds of metres before the intersection.
+    double tightTurnForceFullSteerDistanceM = 55.0;
     double tightTurnForceFullSteerRatio = 1.00;
     double tightTurnForceFullReleaseHeadingDeg = 24.0;
+    // Before the full-tiller window, allow anticipation but cap the requested tiller so
+    // the aircraft does not cut the corner early.
+    double tightTurnPreFullSteerCapRatio = 0.45;
+    double tightTurnPreFullSnapMinRatio = 0.12;
 
     // Corner anticipation makes the taxi controller behave more like an AP lateral mode:
     // it starts blending toward the next leg before the nose reaches the node, instead of
     // waiting until the aircraft is already at the intersection and then correcting back.
     bool turnAnticipation = true;
-    double turnAnticipationDistanceM = 150.0;
+    double turnAnticipationDistanceM = 135.0;
     double turnAnticipationMinAngleDeg = 15.0;
-    double turnAnticipationExtraLookaheadM = 85.0;
+    double turnAnticipationExtraLookaheadM = 45.0;
     double turnAnticipationSlowdownKts = 4.5;
 
     // Tight-corner mode. A very long look-ahead makes a heavy A350 draw a large arc
@@ -208,7 +215,7 @@ struct AutoTaxiConfig {
     // steering authority, and differential braking are also scheduled for a smaller radius.
     bool tightTurnMode = true;
     double tightTurnAngleDeg = 25.0;
-    double tightTurnTriggerDistanceM = 220.0;
+    double tightTurnTriggerDistanceM = 115.0;
     double tightTurnLookaheadAfterApexM = 18.0;
     double tightTurnMinLookaheadM = 14.0;
     double tightTurnSpeedKts = 3.0;
@@ -228,8 +235,8 @@ struct AutoTaxiConfig {
     double steerFastResponseRatePerSec = 60.0;
     bool tightTurnSnapSteer = true;
     double tightTurnSnapBlend = 0.0;
-    double tightTurnSnapMinTargetRatio = 0.98;
-    double tightTurnSnapToRatio = 1.00;
+    double tightTurnSnapMinTargetRatio = 0.12;
+    double tightTurnSnapToRatio = 0.45;
 
     // One-pass 70-100 degree cornering. This is intentionally aggressive at the
     // beginning of a 90-degree taxiway turn, then rolls out before the nose passes

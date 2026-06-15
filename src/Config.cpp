@@ -259,6 +259,8 @@ AutoTaxiConfig loadAutoTaxiConfig(const std::string& iniPath, std::string& error
     cfg.tightTurnForceFullSteerDistanceM = ini.getDouble("tight_turn_force_full_steer_distance_m", cfg.tightTurnForceFullSteerDistanceM);
     cfg.tightTurnForceFullSteerRatio = ini.getDouble("tight_turn_force_full_steer_ratio", cfg.tightTurnForceFullSteerRatio);
     cfg.tightTurnForceFullReleaseHeadingDeg = ini.getDouble("tight_turn_force_full_release_heading_deg", cfg.tightTurnForceFullReleaseHeadingDeg);
+    cfg.tightTurnPreFullSteerCapRatio = ini.getDouble("tight_turn_pre_full_steer_cap_ratio", cfg.tightTurnPreFullSteerCapRatio);
+    cfg.tightTurnPreFullSnapMinRatio = ini.getDouble("tight_turn_pre_full_snap_min_ratio", cfg.tightTurnPreFullSnapMinRatio);
     cfg.turnAnticipation = ini.getBool("turn_anticipation", cfg.turnAnticipation);
     cfg.turnAnticipationDistanceM = ini.getDouble("turn_anticipation_distance_m", cfg.turnAnticipationDistanceM);
     cfg.turnAnticipationMinAngleDeg = ini.getDouble("turn_anticipation_min_angle_deg", cfg.turnAnticipationMinAngleDeg);
