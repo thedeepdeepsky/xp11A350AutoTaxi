@@ -1369,15 +1369,49 @@ void AutoTaxiSystem::updateControl(double dt) {
         }
     }
 
+    double upcomingTurnSignedDeg = 0.0;
+    double upcomingTurnSign = 0.0;
+    if (outboundHeadingValid) {
+        upcomingTurnSignedDeg = geo::diffSignedDeg(outboundHeadingDeg, track.pathHeadingDeg);
+        if (std::abs(upcomingTurnSignedDeg) > 1.0) {
+            upcomingTurnSign = std::copysign(1.0, upcomingTurnSignedDeg);
+        }
+    }
+
+    // Early hard-turn takeover. The direct track-course controller intentionally holds
+    // the current taxiway centerline on straight legs, but before a 70-100 degree corner
+    // it can delay the transition into the one-pass turn program. This blend starts
+    // *before* the normal tight-turn window, fades out track-course authority, and allows
+    // the steering snap logic to arm while there is still distance left to make the turn.
+    double earlyTurnBlend = 0.0;
+    if (!terminalGuardActive && cfg_.earlyTurnTakeover && outboundHeadingValid &&
+        upcomingTurnAngleDeg >= std::max(1.0, cfg_.earlyTurnTakeoverAngleDeg) &&
+        track.distanceToSegmentEndM <= std::max(20.0, cfg_.earlyTurnTakeoverDistanceM)) {
+        const double startDist = std::max(20.0, cfg_.earlyTurnTakeoverDistanceM);
+        const double fullDist = clamp(cfg_.earlyTurnFullDistanceM, 5.0, startDist - 1.0);
+        const double distT = clamp((startDist - track.distanceToSegmentEndM) /
+                                   std::max(1.0, startDist - fullDist), 0.0, 1.0);
+        const double turnT = clamp((upcomingTurnAngleDeg - cfg_.earlyTurnTakeoverAngleDeg) /
+                                   std::max(1.0, 95.0 - cfg_.earlyTurnTakeoverAngleDeg), 0.0, 1.0);
+        const double raw = distT * turnT;
+        if (raw > 0.0) {
+            earlyTurnBlend = clamp(std::max(clamp(cfg_.earlyTurnMinBlend, 0.0, 1.0), raw), 0.0, 1.0);
+        }
+    }
+
     double tightTurnBlend = 0.0;
     if (!terminalGuardActive && cfg_.tightTurnMode &&
         upcomingTurnAngleDeg >= std::max(1.0, cfg_.tightTurnAngleDeg) &&
-        track.distanceToSegmentEndM <= std::max(10.0, cfg_.tightTurnTriggerDistanceM)) {
-        const double distT = 1.0 - clamp(track.distanceToSegmentEndM /
-                                         std::max(10.0, cfg_.tightTurnTriggerDistanceM), 0.0, 1.0);
-        const double turnT = clamp((upcomingTurnAngleDeg - cfg_.tightTurnAngleDeg) /
-                                   std::max(1.0, 95.0 - cfg_.tightTurnAngleDeg), 0.0, 1.0);
-        tightTurnBlend = clamp(0.25 + 0.75 * distT * turnT, 0.0, 1.0);
+        (track.distanceToSegmentEndM <= std::max(10.0, cfg_.tightTurnTriggerDistanceM) || earlyTurnBlend > 0.0)) {
+        double normalTightBlend = 0.0;
+        if (track.distanceToSegmentEndM <= std::max(10.0, cfg_.tightTurnTriggerDistanceM)) {
+            const double distT = 1.0 - clamp(track.distanceToSegmentEndM /
+                                             std::max(10.0, cfg_.tightTurnTriggerDistanceM), 0.0, 1.0);
+            const double turnT = clamp((upcomingTurnAngleDeg - cfg_.tightTurnAngleDeg) /
+                                       std::max(1.0, 95.0 - cfg_.tightTurnAngleDeg), 0.0, 1.0);
+            normalTightBlend = clamp(0.25 + 0.75 * distT * turnT, 0.0, 1.0);
+        }
+        tightTurnBlend = std::max(normalTightBlend, earlyTurnBlend);
 
         // Tight-radius cornering: aim just beyond the corner apex instead of using a
         // long speed-based lookahead far down the next leg. This reduces the drawn arc
@@ -1415,7 +1449,8 @@ void AutoTaxiSystem::updateControl(double dt) {
         }
     }
 
-    const bool hardOnePassTurn = !terminalGuardActive && cfg_.tightTurnOnePassMode && tightTurnBlend > 0.05 &&
+    const bool hardOnePassTurn = !terminalGuardActive && cfg_.tightTurnOnePassMode &&
+        (tightTurnBlend > 0.05 || earlyTurnBlend > 0.0) &&
         upcomingTurnAngleDeg >= std::max(1.0, cfg_.tightTurnOnePassAngleDeg);
 
     // Path-following heading error. This points to a look-ahead point on the *planned route*,
@@ -1469,6 +1504,58 @@ void AutoTaxiSystem::updateControl(double dt) {
 
         if (willCrossSoon || movingTowardCenter || movingAwayFromCenter) {
             xteForControlM = predicted;
+        }
+    }
+
+    // XTE corridor / sway guard. Instead of trying to drive every capture all the
+    // way to exactly 0 m immediately, first capture into a +/- corridor, then
+    // transition to low-gain fine tracking. This prevents the controller from
+    // applying a large yaw command at XTE 3-5 m and then S-turning across the line.
+    double xteCorridorBlend = 0.0;       // 0 outside corridor, 1 in fine-tune zone
+    double xteCorridorOuterBlend = 0.0;  // outside +/- corridor but still managed
+    double xteCorridorSteerDampBlend = 0.0;
+    double xteCorridorTrackMaxInterceptDeg = cfg_.trackCourseMaxInterceptDeg;
+    const bool xteCorridorAvailable = cfg_.xteCorridorControl && !terminalGuardActive && !hardOnePassTurn;
+    if (xteCorridorAvailable) {
+        const double corridorM = std::max(0.5, cfg_.xteCorridorM);
+        const double fineM = clamp(cfg_.xteFineTuneM, 0.05, corridorM);
+        const double rateWeight = clamp(cfg_.microAnticipateGeomRateWeight, 0.0, 1.0);
+        const double blendedRate = xteRateMps * (1.0 - rateWeight) + geomXteRateMps * rateWeight;
+        const double leadSec = std::max(0.0, cfg_.xteCorridorLeadSec);
+        const double leadXte = clamp(xteM + blendedRate * leadSec, -corridorM * 2.0, corridorM * 2.0);
+        const bool headingTowardCenter = (xteM * geomXteRateMps) < 0.0;
+        const double sign = (xteM == 0.0) ? 0.0 : std::copysign(1.0, xteM);
+
+        if (xteAbsM <= corridorM) {
+            const double bandT = clamp((corridorM - xteAbsM) / std::max(0.10, corridorM - fineM), 0.0, 1.0);
+            const double fineT = clamp((fineM - xteAbsM) / std::max(0.10, fineM), 0.0, 1.0);
+            xteCorridorBlend = std::max(bandT, fineT);
+            xteCorridorSteerDampBlend = clamp(0.25 + 0.75 * bandT, 0.0, 1.0);
+
+            // Fine tracking uses a softened effective XTE. If the nose is already
+            // moving toward the centerline, the lead value may be smaller or even
+            // opposite sign; using it starts the rollout before crossing 0 m.
+            const double innerGain = clamp(cfg_.xteCorridorInnerGain, 0.05, 1.0);
+            double softened = sign * (xteAbsM <= fineM
+                ? xteAbsM * innerGain
+                : fineM * innerGain + (xteAbsM - fineM) * (0.55 + 0.45 * innerGain));
+            if (headingTowardCenter && (std::abs(leadXte) < std::abs(softened) || leadXte * xteM < 0.0)) {
+                softened = leadXte;
+            }
+            xteForControlM = softened;
+            xteCorridorTrackMaxInterceptDeg = std::min(xteCorridorTrackMaxInterceptDeg,
+                std::max(3.0, cfg_.xteCorridorMaxInterceptDeg));
+        } else {
+            // Outside the corridor, do not aim for an immediate centerline crossing.
+            // Aim for the corridor boundary plus a reduced excess term so the first
+            // capture normally lands inside +/-5 m rather than overshooting through it.
+            const double excess = xteAbsM - corridorM;
+            const double outerGain = clamp(cfg_.xteCorridorOuterGain, 0.10, 1.0);
+            const double managedXte = sign * (corridorM + excess * outerGain);
+            xteForControlM = managedXte;
+            xteCorridorOuterBlend = clamp((xteAbsM - corridorM) / std::max(1.0, corridorM), 0.0, 1.0);
+            xteCorridorTrackMaxInterceptDeg = std::min(xteCorridorTrackMaxInterceptDeg,
+                std::max(cfg_.xteCorridorMaxInterceptDeg, cfg_.xteCorridorOuterMaxInterceptDeg));
         }
     }
 
@@ -1533,6 +1620,22 @@ void AutoTaxiSystem::updateControl(double dt) {
                                         std::max(1.0, cfg_.fastCaptureStartSeconds), 0.0, 1.0);
             captureBlend = std::max(captureBlend, 0.45 * startT);
         }
+
+        // Once inside the desired XTE corridor, fade out the aggressive capture mode.
+        // This is what prevents the aircraft from correcting hard at XTE 3-5 m,
+        // crossing the line, then correcting hard the other way. Outside the corridor
+        // capture remains available, but the corridor logic above manages the first
+        // intercept to land inside +/- xte_corridor_m.
+        if (xteCorridorAvailable) {
+            const double corridorM = std::max(0.5, cfg_.xteCorridorM);
+            const double fade = clamp(cfg_.xteCorridorCaptureFade, 0.0, 1.0);
+            if (xteAbsM <= corridorM) {
+                captureBlend *= fade;
+            } else if (xteAbsM < corridorM + 2.0) {
+                const double t = clamp((xteAbsM - corridorM) / 2.0, 0.0, 1.0);
+                captureBlend *= fade + (1.0 - fade) * t;
+            }
+        }
     }
 
     // When we have just crossed the route centerline and the remaining error is small,
@@ -1552,9 +1655,18 @@ void AutoTaxiSystem::updateControl(double dt) {
     if (microLeadBlend > 0.0) {
         xteGain *= 1.0 + microLeadBlend * std::max(0.0, cfg_.microAnticipateBiasBoost - 1.0);
     }
+    if (xteCorridorAvailable && xteCorridorBlend > 0.0) {
+        const double innerScale = clamp(cfg_.xteCorridorInnerGain, 0.05, 1.0);
+        xteGain *= (1.0 - xteCorridorBlend) + xteCorridorBlend * innerScale;
+    }
     const double normalMaxBias = std::max(0.0, cfg_.pidCrossTrackMaxDeg);
     const double fastMaxBias = std::max(normalMaxBias, cfg_.fastCaptureMaxBiasDeg);
-    const double maxXteBiasDeg = normalMaxBias + captureBlend * (fastMaxBias - normalMaxBias);
+    double maxXteBiasDeg = normalMaxBias + captureBlend * (fastMaxBias - normalMaxBias);
+    if (xteCorridorAvailable && xteCorridorBlend > 0.0) {
+        maxXteBiasDeg = std::min(maxXteBiasDeg, std::max(2.0, cfg_.xteCorridorMaxInterceptDeg));
+    } else if (xteCorridorAvailable && xteCorridorOuterBlend > 0.0) {
+        maxXteBiasDeg = std::min(maxXteBiasDeg, std::max(cfg_.xteCorridorMaxInterceptDeg, cfg_.xteCorridorOuterMaxInterceptDeg));
+    }
     const double xteBiasDeg = clamp(xteForControlM * xteGain, -maxXteBiasDeg, maxXteBiasDeg);
 
     const double lookaheadHeadingErr =
@@ -1607,16 +1719,27 @@ void AutoTaxiSystem::updateControl(double dt) {
 
         const double interceptDistM = std::max(6.0, cfg_.trackCourseLookaheadM +
             gsKts * std::max(0.0, cfg_.trackCourseSpeedGainMPerKt));
+        const double interceptLimitDeg = std::max(2.0, xteCorridorTrackMaxInterceptDeg);
         const double interceptDeg = clamp(
             geo::rad2deg(std::atan2(courseXteM * std::max(0.05, cfg_.trackCourseGain), interceptDistM)),
-            -std::max(2.0, cfg_.trackCourseMaxInterceptDeg),
-             std::max(2.0, cfg_.trackCourseMaxInterceptDeg));
+            -interceptLimitDeg,
+             interceptLimitDeg);
         courseHeadingErr = geo::diffSignedDeg(geo::normalize360(track.pathHeadingDeg + interceptDeg), psi);
     }
 
-    const double courseFade = 1.0 - clamp(tightTurnBlend * clamp(cfg_.trackCourseTightTurnFade, 0.0, 1.0), 0.0, 1.0);
+    double routeTrackFadeOut = clamp(tightTurnBlend * clamp(cfg_.trackCourseTightTurnFade, 0.0, 1.0), 0.0, 1.0);
+    if (earlyTurnBlend > 0.0) {
+        routeTrackFadeOut = std::max(routeTrackFadeOut,
+            clamp(earlyTurnBlend * clamp(cfg_.earlyTurnTrackCourseFade, 0.0, 1.0), 0.0, 1.0));
+    }
+    const double courseFade = 1.0 - routeTrackFadeOut;
     const double courseBlend = clamp(cfg_.trackCourseBlend, 0.0, 1.0) * courseFade;
     double headingErr = lookaheadHeadingErr * (1.0 - courseBlend) + courseHeadingErr * courseBlend;
+    if (earlyTurnBlend > 0.0 && outboundHeadingValid) {
+        const double outboundErrForTakeover = geo::diffSignedDeg(outboundHeadingDeg, psi);
+        const double takeoverBlend = clamp(earlyTurnBlend * clamp(cfg_.earlyTurnHeadingBlend, 0.0, 1.0), 0.0, 1.0);
+        headingErr = headingErr * (1.0 - takeoverBlend) + outboundErrForTakeover * takeoverBlend;
+    }
     headingErr = clamp(headingErr, -180.0, 180.0);
     if ((microLeadBlend > 0.0 || trackCoursePrezeroBlend > 0.0) &&
         std::abs(headingErr) < std::max(0.0, cfg_.microAnticipateDeadbandDeg)) {
@@ -1683,10 +1806,16 @@ void AutoTaxiSystem::updateControl(double dt) {
         pidPrevHeadingErrDeg_ = limitedErr;
         pidPrevValid_ = true;
 
-        const double kp = cfg_.pidHeadingKp *
+        const double corridorKpScale = xteCorridorAvailable
+            ? ((1.0 - xteCorridorBlend) + xteCorridorBlend * clamp(cfg_.xteCorridorKpScale, 0.10, 1.0))
+            : 1.0;
+        const double corridorKdScale = xteCorridorAvailable
+            ? (1.0 + xteCorridorBlend * std::max(0.0, cfg_.xteCorridorKdBoost - 1.0))
+            : 1.0;
+        const double kp = cfg_.pidHeadingKp * corridorKpScale *
             (1.0 + captureBlend * std::max(0.0, cfg_.fastCaptureKpBoost - 1.0)) *
             (1.0 + tightTurnBlend * std::max(0.0, cfg_.tightTurnKpBoost - 1.0));
-        const double kd = cfg_.pidHeadingKd *
+        const double kd = cfg_.pidHeadingKd * corridorKdScale *
             (1.0 + captureBlend * std::max(0.0, cfg_.fastCaptureKdBoost - 1.0)) *
             (1.0 + tightTurnBlend * std::max(0.0, cfg_.tightTurnKdBoost - 1.0));
 
@@ -1710,6 +1839,26 @@ void AutoTaxiSystem::updateControl(double dt) {
             pidOutputDeg = pidOutputDeg * (1.0 - 0.65 * blend) + returnPidDeg * (0.65 * blend);
         }
         pidIntegralDegSec_ *= std::max(0.0, 1.0 - 0.85 * blend);
+    }
+
+    // Corridor pre-zero rollout / anti-sway. If we are already inside the desired
+    // XTE corridor and the nose is cutting toward the centerline, do not keep a
+    // large same-direction yaw command. Blend toward a small opposite command before
+    // XTE reaches 0 m. This is separate from the older micro-return logic because
+    // it also triggers at 3-5 m XTE, not only very close to the centerline.
+    if (xteCorridorAvailable && xteCorridorSteerDampBlend > 0.0 && xteAbsM > 0.05) {
+        const bool headingTowardCenter = (xteM * geomXteRateMps) < 0.0;
+        const bool pidTowardCenter = (pidOutputDeg * xteM) > 0.0;
+        if (headingTowardCenter && pidTowardCenter) {
+            const double blend = clamp(xteCorridorSteerDampBlend, 0.0, 1.0);
+            const double returnSign = -std::copysign(1.0, xteM);
+            const double returnPidDeg = returnSign * std::max(0.0, cfg_.xteCorridorPrezeroReturnDeg) * blend;
+            pidOutputDeg = pidOutputDeg * (1.0 - 0.70 * blend) + returnPidDeg * (0.70 * blend);
+            pidIntegralDegSec_ *= std::max(0.0, 1.0 - 0.90 * blend);
+        }
+        const double cap = std::max(3.0, cfg_.xteCorridorMaxInterceptDeg) +
+            (1.0 - xteCorridorBlend) * 6.0;
+        pidOutputDeg = clamp(pidOutputDeg, -cap, cap);
     }
 
     // One-pass 90-degree turn rollout. For a tight 70-100 degree corner we want an
@@ -1780,6 +1929,15 @@ void AutoTaxiSystem::updateControl(double dt) {
         }
     }
 
+    if (xteCorridorAvailable && xteCorridorSteerDampBlend > 0.0 && tightTurnBlend < 0.08 && earlyTurnBlend <= 0.0) {
+        const double blend = clamp(xteCorridorSteerDampBlend, 0.0, 1.0);
+        const double scale = clamp(cfg_.swayDampingCommandScale, 0.20, 1.0);
+        const bool targetTowardCenter = (targetSteer * xteM) > 0.0;
+        if (targetTowardCenter) {
+            targetSteer *= (1.0 - blend) + blend * scale;
+        }
+    }
+
     const double captureSmoothingPerSec = cfg_.steerSmoothingPerSec +
         captureBlend * (cfg_.fastCaptureSteerSmoothingPerSec - cfg_.steerSmoothingPerSec);
     const double tightSmoothingPerSec = cfg_.steerSmoothingPerSec +
@@ -1788,22 +1946,50 @@ void AutoTaxiSystem::updateControl(double dt) {
                                        captureSmoothingPerSec,
                                        tightSmoothingPerSec});
 
+    const bool corridorFineMode = xteCorridorAvailable && xteAbsM <= std::max(0.5, cfg_.xteCorridorM) &&
+        tightTurnBlend < 0.08 && earlyTurnBlend <= 0.0;
     const bool fastSteerDemand = cfg_.steerFastResponse &&
-        (tightTurnBlend > 0.05 || captureBlend > 0.10 || microLeadBlend > 0.10 ||
-         microReturnBlend > 0.05 || trackCoursePrezeroBlend > 0.05 ||
-         std::abs(pidOutputDeg) >= std::max(1.0, cfg_.steerFastResponseErrorDeg) ||
-         std::abs(xteForControlM) >= std::max(0.1, cfg_.steerFastResponseXteM));
+        (tightTurnBlend > 0.05 || earlyTurnBlend > 0.0 || captureBlend > 0.10 ||
+         (!corridorFineMode && microLeadBlend > 0.10) ||
+         (!corridorFineMode && microReturnBlend > 0.05) ||
+         (!corridorFineMode && trackCoursePrezeroBlend > 0.05) ||
+         (!corridorFineMode && std::abs(pidOutputDeg) >= std::max(1.0, cfg_.steerFastResponseErrorDeg)) ||
+         (!corridorFineMode && std::abs(xteForControlM) >= std::max(0.1, cfg_.steerFastResponseXteM)));
     if (fastSteerDemand) {
         smoothingPerSec = std::max(smoothingPerSec, std::max(0.5, cfg_.steerFastResponseRatePerSec));
+    }
+    if (corridorFineMode && xteCorridorSteerDampBlend > 0.0) {
+        const double blend = clamp(xteCorridorSteerDampBlend, 0.0, 1.0);
+        const double fineRate = std::max(0.20, cfg_.swayDampingSteerRatePerSec);
+        smoothingPerSec = smoothingPerSec * (1.0 - blend) + fineRate * blend;
     }
     if (hardOnePassTurn) {
         smoothingPerSec = std::max(smoothingPerSec, std::max(1.0, cfg_.tightTurnSteerSmoothingPerSec));
     }
 
+    // Early hard-turn snap floor. This is intentionally before the regular snap code:
+    // if track-course/route-following has kept the target too small while a big corner
+    // is approaching, force a turn-side steering request while still far enough away.
+    if (cfg_.earlyTurnTakeover && earlyTurnBlend > 0.0 && hardOnePassTurn && outboundHeadingValid) {
+        const double rolloutBand = std::max(4.0, cfg_.tightTurnRolloutHeadingDeg);
+        const bool rolloutSoon = std::abs(outboundHeadingErr) < rolloutBand;
+        double turnSide = std::abs(outboundHeadingErr) > 2.0
+            ? std::copysign(1.0, outboundHeadingErr)
+            : upcomingTurnSign;
+        if (!rolloutSoon && turnSide != 0.0) {
+            const double snapTo = clamp(cfg_.earlyTurnSnapToRatio, 0.0, 1.0);
+            const double minFloor = clamp(cfg_.earlyTurnSnapMinTargetRatio, 0.0, snapTo);
+            const double snapFloor = clamp(minFloor * earlyTurnBlend, 0.0, snapTo);
+            if (snapFloor > 0.0 && (targetSteer * turnSide < snapFloor)) {
+                targetSteer = turnSide * std::max(std::abs(targetSteer), snapFloor);
+            }
+        }
+    }
+
     // Optional snap-in for tight turns: if we are close to a real taxiway corner and the
     // requested tiller already has a clear sign, do not spend a full second ramping from
     // zero. This is what reduces the initial wide arc before the A350 actually turns.
-    if (cfg_.tightTurnSnapSteer && tightTurnBlend >= std::max(0.0, cfg_.tightTurnSnapBlend)) {
+    if (cfg_.tightTurnSnapSteer && (tightTurnBlend >= std::max(0.0, cfg_.tightTurnSnapBlend) || earlyTurnBlend > 0.0)) {
         double snapTo = clamp(cfg_.tightTurnSnapToRatio, 0.0, 1.0);
         double snapMinTarget = std::max(0.0, cfg_.tightTurnSnapMinTargetRatio);
         double snapFloor = 0.0;

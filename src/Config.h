@@ -69,14 +69,14 @@ struct AutoTaxiConfig {
     // AP-like path tracking. The aircraft follows the fixed planned taxi polyline;
     // it does not chase the closest node directly, which avoids +/- steering hunting near nodes.
     bool pidRouteTracking = true;
-    double pidHeadingKp = 0.62;
+    double pidHeadingKp = 0.48;
     double pidHeadingKi = 0.000;
-    double pidHeadingKd = 0.26;
+    double pidHeadingKd = 0.36;
     double pidIntegralLimitDegSec = 45.0;
-    double pidDerivativeFilterSec = 0.55;
-    double pidCrossTrackGainDegPerM = 0.16;
-    double pidCrossTrackMaxDeg = 16.0;
-    double maxTrackCaptureAngleDeg = 88.0;
+    double pidDerivativeFilterSec = 0.62;
+    double pidCrossTrackGainDegPerM = 0.10;
+    double pidCrossTrackMaxDeg = 10.0;
+    double maxTrackCaptureAngleDeg = 58.0;
 
     // Fast route-capture mode for startup/off-track cases.
     // When the aircraft is several metres away from the planned polyline,
@@ -85,15 +85,15 @@ struct AutoTaxiConfig {
     // Once the aircraft is back near the line, it fades back to the smoother PID.
     bool fastRouteCapture = true;
     double fastCaptureStartSeconds = 28.0;
-    double fastCaptureThresholdM = 5.0;
-    double fastCaptureHardThresholdM = 18.0;
-    double fastCaptureGainDegPerM = 0.85;
-    double fastCaptureMaxBiasDeg = 48.0;
-    double fastCaptureKpBoost = 1.30;
-    double fastCaptureKdBoost = 1.45;
+    double fastCaptureThresholdM = 5.5;
+    double fastCaptureHardThresholdM = 16.0;
+    double fastCaptureGainDegPerM = 0.52;
+    double fastCaptureMaxBiasDeg = 28.0;
+    double fastCaptureKpBoost = 1.05;
+    double fastCaptureKdBoost = 1.65;
     double fastCaptureSteerFullDeflectionDeg = 45.0;
-    double fastCaptureSteerSmoothingPerSec = 2.60;
-    double nearRouteDampingM = 4.0;
+    double fastCaptureSteerSmoothingPerSec = 2.20;
+    double nearRouteDampingM = 5.0;
 
     // Predictive cross-track lead. This is the taxi equivalent of an AP localizer
     // lead/damping term: if XTE is moving toward zero, command the next correction
@@ -126,11 +126,11 @@ struct AutoTaxiConfig {
     // blend the requested steer toward the opposite side before XTE reaches zero.
     bool microAnticipateDirectSteer = true;
     double microAnticipateDirectBandM = 7.0;
-    double microAnticipateCounterSteerRatio = 0.28;
-    double microAnticipateCounterMinRatio = 0.08;
+    double microAnticipateCounterSteerRatio = 0.22;
+    double microAnticipateCounterMinRatio = 0.06;
     double microAnticipateTowardSteerThreshold = 0.015;
-    double microAnticipateDirectBlend = 1.0;
-    double microAnticipatePidReturnDeg = 12.0;
+    double microAnticipateDirectBlend = 0.80;
+    double microAnticipatePidReturnDeg = 9.0;
 
     // Track-course controller. This directly follows the current taxiway leg heading
     // plus a Stanley/L1-style cross-track intercept angle. It reacts as soon as XTE
@@ -141,14 +141,48 @@ struct AutoTaxiConfig {
     double trackCourseBlend = 0.92;
     double trackCourseLookaheadM = 16.0;
     double trackCourseSpeedGainMPerKt = 0.55;
-    double trackCourseGain = 1.55;
-    double trackCourseMaxInterceptDeg = 38.0;
+    double trackCourseGain = 1.18;
+    double trackCourseMaxInterceptDeg = 26.0;
     double trackCoursePrezeroBandM = 11.0;
     double trackCoursePrezeroLeadSec = 5.6;
     double trackCoursePrezeroPower = 2.30;
     double trackCoursePrezeroMinHeadingDeg = 0.10;
-    double trackCoursePrezeroCounterM = 7.0;
+    double trackCoursePrezeroCounterM = 4.8;
     double trackCourseTightTurnFade = 0.85;
+
+    // XTE corridor / sway guard. The controller should not wait until a large
+    // deviation exists, but it should also avoid over-commanding yaw and S-turning
+    // across the centerline. This mode first captures into a +/- corridor, then
+    // fades to fine tracking with stronger damping and smaller intercept angles.
+    bool xteCorridorControl = true;
+    double xteCorridorM = 5.0;
+    double xteFineTuneM = 1.2;
+    double xteCorridorOuterGain = 0.55;
+    double xteCorridorInnerGain = 0.42;
+    double xteCorridorMaxInterceptDeg = 13.0;
+    double xteCorridorOuterMaxInterceptDeg = 22.0;
+    double xteCorridorLeadSec = 4.0;
+    double xteCorridorPrezeroReturnDeg = 7.0;
+    double xteCorridorKpScale = 0.52;
+    double xteCorridorKdBoost = 1.45;
+    double xteCorridorCaptureFade = 0.18;
+    double swayDampingBandM = 6.0;
+    double swayDampingCommandScale = 0.55;
+    double swayDampingSteerRatePerSec = 2.0;
+
+    // Early hard-turn takeover. Track-course control is good on straight legs, but it can
+    // keep commanding the current leg for too long before a 70-100 degree taxiway corner.
+    // This mode fades track-course out earlier, blends toward the outbound leg, and allows
+    // a snap-to-tiller command before the nose reaches the intersection.
+    bool earlyTurnTakeover = true;
+    double earlyTurnTakeoverAngleDeg = 55.0;
+    double earlyTurnTakeoverDistanceM = 185.0;
+    double earlyTurnFullDistanceM = 115.0;
+    double earlyTurnMinBlend = 0.30;
+    double earlyTurnHeadingBlend = 0.95;
+    double earlyTurnTrackCourseFade = 1.0;
+    double earlyTurnSnapToRatio = 0.98;
+    double earlyTurnSnapMinTargetRatio = 0.82;
 
     // Corner anticipation makes the taxi controller behave more like an AP lateral mode:
     // it starts blending toward the next leg before the nose reaches the node, instead of
@@ -182,7 +216,7 @@ struct AutoTaxiConfig {
     bool steerFastResponse = true;
     double steerFastResponseErrorDeg = 10.0;
     double steerFastResponseXteM = 2.5;
-    double steerFastResponseRatePerSec = 14.0;
+    double steerFastResponseRatePerSec = 13.0;
     bool tightTurnSnapSteer = true;
     double tightTurnSnapBlend = 0.06;
     double tightTurnSnapMinTargetRatio = 0.25;
