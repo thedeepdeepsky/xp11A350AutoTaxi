@@ -1326,6 +1326,66 @@ void AutoTaxiSystem::updateControl(double dt) {
     const auto& finalNode = airport_.nodes.at(route_.back());
     const double finalDistM = geo::distanceMeters(lat, lon, finalNode.lat, finalNode.lon);
     const double terminalRemainingM = routeRemainingDistanceM(lat, lon);
+
+    // Runway destination line-up geometry. A runway destination should not simply
+    // stop at the nearest hold-short/active-zone node; once close enough, switch to
+    // runway-centreline capture and align the aircraft heading with the selected
+    // runway direction. Positive signed XTE means the aircraft is left of runway
+    // centreline in the selected runway heading direction.
+    bool runwayAlignGeoValid = false;
+    bool runwayAlignActive = false;
+    double runwayAlignBlend = 0.0;
+    double runwayHeadingDeg = 0.0;
+    double runwayHeadingErrDeg = 0.0;
+    double runwaySignedXteM = 0.0;
+    double runwayDistToThresholdM = std::numeric_limits<double>::infinity();
+    if (cfg_.runwayAlignmentMode && selectedDestinationIndex_ >= 0 &&
+        selectedDestinationIndex_ < static_cast<int>(destinations_.size())) {
+        const DestinationChoice& dest = destinations_[selectedDestinationIndex_];
+        if (dest.kind == DestinationKind::Runway) {
+            const std::string wantedEnd = toUpper(dest.runwayEnd);
+            for (const auto& rw : airport_.runways) {
+                double thrLat = 0.0, thrLon = 0.0, farLat = 0.0, farLon = 0.0;
+                if (toUpper(rw.end1) == wantedEnd) {
+                    thrLat = rw.lat1; thrLon = rw.lon1; farLat = rw.lat2; farLon = rw.lon2;
+                } else if (toUpper(rw.end2) == wantedEnd) {
+                    thrLat = rw.lat2; thrLon = rw.lon2; farLat = rw.lat1; farLon = rw.lon1;
+                } else {
+                    continue;
+                }
+
+                double tx = 0.0, ty = 0.0, fx = 0.0, fy = 0.0;
+                geo::latLonToLocalMeters(lat, lon, thrLat, thrLon, tx, ty);
+                geo::latLonToLocalMeters(lat, lon, farLat, farLon, fx, fy);
+                const double vx = fx - tx;
+                const double vy = fy - ty;
+                const double len = std::hypot(vx, vy);
+                if (len < 100.0) break;
+                const double ux = vx / len;
+                const double uy = vy / len;
+                const double aircraftFromThresholdX = -tx;
+                const double aircraftFromThresholdY = -ty;
+                runwaySignedXteM = ux * aircraftFromThresholdY - uy * aircraftFromThresholdX;
+                runwayHeadingDeg = geo::bearingDeg(thrLat, thrLon, farLat, farLon);
+                runwayHeadingErrDeg = geo::diffSignedDeg(runwayHeadingDeg, psi);
+                runwayDistToThresholdM = geo::distanceMeters(lat, lon, thrLat, thrLon);
+                runwayAlignGeoValid = true;
+                break;
+            }
+        }
+    }
+
+    if (runwayAlignGeoValid) {
+        const double captureDist = std::max(50.0, cfg_.runwayAlignCaptureDistanceM);
+        const double fullDist = clamp(cfg_.runwayAlignFullDistanceM, 20.0, captureDist - 1.0);
+        const double distBasis = std::min(terminalRemainingM, runwayDistToThresholdM);
+        if (distBasis <= captureDist) {
+            runwayAlignActive = true;
+            const double rawBlend = clamp((captureDist - distBasis) / std::max(1.0, captureDist - fullDist), 0.0, 1.0);
+            runwayAlignBlend = clamp(0.35 + 0.65 * rawBlend, 0.0, 1.0);
+        }
+    }
+
     const double terminalStopRadiusM = std::max(cfg_.finalStopRadiusM, cfg_.terminalArrivalRadiusM);
     const double terminalNoTightDistanceM = std::max(terminalStopRadiusM, cfg_.terminalNoTightTurnDistanceM);
     const bool terminalGuardActive = cfg_.terminalArrivalGuard &&
@@ -1349,7 +1409,11 @@ void AutoTaxiSystem::updateControl(double dt) {
         finalDistM <= std::max(terminalStopRadiusM, cfg_.terminalOvershootRadiusM) &&
         gsKts <= 6.0;
 
-    if (terminalInsideBubble || terminalRouteComplete || terminalOvershotClose) {
+    const bool runwayAlignmentComplete = !runwayAlignActive ||
+        (std::abs(runwaySignedXteM) <= std::max(0.5, cfg_.runwayAlignCenterToleranceM) &&
+         std::abs(runwayHeadingErrDeg) <= std::max(0.5, cfg_.runwayAlignHeadingToleranceDeg));
+
+    if ((terminalInsideBubble || terminalRouteComplete || terminalOvershotClose) && runwayAlignmentComplete) {
         arriveAndHold();
         return;
     }
@@ -1377,6 +1441,17 @@ void AutoTaxiSystem::updateControl(double dt) {
             upcomingTurnSign = std::copysign(1.0, upcomingTurnSignedDeg);
         }
     }
+    const double outboundHeadingErrForTurn = outboundHeadingValid ? geo::diffSignedDeg(outboundHeadingDeg, psi) : 0.0;
+
+    // Force-full-turn arming. This bypasses the slow blend/rate-limit path for
+    // large upcoming corners; the steer command will be snapped directly to full
+    // tiller later, until the nose is close enough to outbound heading to roll out.
+    const bool forceFullTurnWindow = !terminalGuardActive && cfg_.tightTurnForceFullSteer &&
+        outboundHeadingValid && upcomingTurnAngleDeg >= std::max(1.0, cfg_.tightTurnForceFullSteerAngleDeg) &&
+        track.distanceToSegmentEndM <= std::max(20.0, cfg_.tightTurnForceFullSteerDistanceM);
+    const bool forceFullTurnRollout = forceFullTurnWindow &&
+        std::abs(outboundHeadingErrForTurn) <= std::max(3.0, cfg_.tightTurnForceFullReleaseHeadingDeg);
+    const bool forceFullTurnActive = forceFullTurnWindow && !forceFullTurnRollout;
 
     // Early hard-turn takeover. The direct track-course controller intentionally holds
     // the current taxiway centerline on straight legs, but before a 70-100 degree corner
@@ -1397,6 +1472,10 @@ void AutoTaxiSystem::updateControl(double dt) {
         if (raw > 0.0) {
             earlyTurnBlend = clamp(std::max(clamp(cfg_.earlyTurnMinBlend, 0.0, 1.0), raw), 0.0, 1.0);
         }
+    }
+    if (forceFullTurnActive) {
+        // Make route-track fade and tight-turn speed/brake scheduling engage immediately.
+        earlyTurnBlend = 1.0;
     }
 
     double tightTurnBlend = 0.0;
@@ -1740,12 +1819,25 @@ void AutoTaxiSystem::updateControl(double dt) {
         const double takeoverBlend = clamp(earlyTurnBlend * clamp(cfg_.earlyTurnHeadingBlend, 0.0, 1.0), 0.0, 1.0);
         headingErr = headingErr * (1.0 - takeoverBlend) + outboundErrForTakeover * takeoverBlend;
     }
+    if (runwayAlignActive && runwayAlignGeoValid) {
+        // Centreline + heading alignment for runway destinations. If the aircraft is
+        // left of the selected runway centreline, bias the desired heading right of
+        // runway heading; if it is right, bias left. As the aircraft gets closer to
+        // the threshold/route end this overrides taxi-route tracking.
+        const double centreInterceptDeg = clamp(-runwaySignedXteM * std::max(0.0, cfg_.runwayAlignCenterGainDegPerM),
+                                                -std::max(1.0, cfg_.runwayAlignMaxInterceptDeg),
+                                                 std::max(1.0, cfg_.runwayAlignMaxInterceptDeg));
+        const double desiredRunwayDeg = geo::normalize360(runwayHeadingDeg + centreInterceptDeg);
+        const double runwayErr = geo::diffSignedDeg(desiredRunwayDeg, psi);
+        const double blend = clamp(runwayAlignBlend, 0.0, 1.0);
+        headingErr = headingErr * (1.0 - blend) + runwayErr * blend;
+    }
     headingErr = clamp(headingErr, -180.0, 180.0);
     if ((microLeadBlend > 0.0 || trackCoursePrezeroBlend > 0.0) &&
         std::abs(headingErr) < std::max(0.0, cfg_.microAnticipateDeadbandDeg)) {
         headingErr = 0.0;
     }
-    const double outboundHeadingErr = outboundHeadingValid ? geo::diffSignedDeg(outboundHeadingDeg, psi) : 0.0;
+    const double outboundHeadingErr = outboundHeadingErrForTurn;
     const double pathHeadingErr = pathHeadingErrForLead;
     lastCrossTrackErrorM_ = xteM;
     lastPathHeadingErrorDeg_ = pathHeadingErr;
@@ -1780,6 +1872,11 @@ void AutoTaxiSystem::updateControl(double dt) {
         const double t = clamp(finalDistM / 160.0, 0.0, 1.0);
         const double slow = geo::knotsToMps(cfg_.finalSpeedKts);
         targetSpeedMps = slow + t * (targetSpeedMps - slow);
+    }
+    if (runwayAlignActive && runwayAlignGeoValid) {
+        const double alignSpeed = geo::knotsToMps(std::max(1.0, cfg_.runwayAlignSpeedKts));
+        const double blend = clamp(runwayAlignBlend, 0.0, 1.0);
+        targetSpeedMps = targetSpeedMps * (1.0 - blend) + alignSpeed * blend;
     }
 
     // AP-like PID yaw/path controller. Output is a commanded correction angle, then mapped
@@ -1965,6 +2062,22 @@ void AutoTaxiSystem::updateControl(double dt) {
     }
     if (hardOnePassTurn) {
         smoothingPerSec = std::max(smoothingPerSec, std::max(1.0, cfg_.tightTurnSteerSmoothingPerSec));
+    }
+
+    // Absolute force-full-turn command. This is intentionally stronger than the
+    // existing snap floor: for large turns it sets the smoothed command immediately
+    // to full tiller, so there is no slow ramp through 0.2/0.4/0.6 first.
+    if (forceFullTurnActive && outboundHeadingValid) {
+        double turnSide = std::abs(outboundHeadingErr) > 2.0
+            ? std::copysign(1.0, outboundHeadingErr)
+            : upcomingTurnSign;
+        if (turnSide != 0.0) {
+            const double ratio = clamp(cfg_.tightTurnForceFullSteerRatio, 0.05, 1.0);
+            targetSteer = turnSide * ratio;
+            smoothedSteer_ = targetSteer;
+            smoothingPerSec = std::max(smoothingPerSec, 120.0);
+            pidIntegralDegSec_ = 0.0;
+        }
     }
 
     // Early hard-turn snap floor. This is intentionally before the regular snap code:

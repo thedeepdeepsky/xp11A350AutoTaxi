@@ -254,6 +254,11 @@ AutoTaxiConfig loadAutoTaxiConfig(const std::string& iniPath, std::string& error
     cfg.earlyTurnTrackCourseFade = ini.getDouble("early_turn_track_course_fade", cfg.earlyTurnTrackCourseFade);
     cfg.earlyTurnSnapToRatio = ini.getDouble("early_turn_snap_to_ratio", cfg.earlyTurnSnapToRatio);
     cfg.earlyTurnSnapMinTargetRatio = ini.getDouble("early_turn_snap_min_target_ratio", cfg.earlyTurnSnapMinTargetRatio);
+    cfg.tightTurnForceFullSteer = ini.getBool("tight_turn_force_full_steer", cfg.tightTurnForceFullSteer);
+    cfg.tightTurnForceFullSteerAngleDeg = ini.getDouble("tight_turn_force_full_steer_angle_deg", cfg.tightTurnForceFullSteerAngleDeg);
+    cfg.tightTurnForceFullSteerDistanceM = ini.getDouble("tight_turn_force_full_steer_distance_m", cfg.tightTurnForceFullSteerDistanceM);
+    cfg.tightTurnForceFullSteerRatio = ini.getDouble("tight_turn_force_full_steer_ratio", cfg.tightTurnForceFullSteerRatio);
+    cfg.tightTurnForceFullReleaseHeadingDeg = ini.getDouble("tight_turn_force_full_release_heading_deg", cfg.tightTurnForceFullReleaseHeadingDeg);
     cfg.turnAnticipation = ini.getBool("turn_anticipation", cfg.turnAnticipation);
     cfg.turnAnticipationDistanceM = ini.getDouble("turn_anticipation_distance_m", cfg.turnAnticipationDistanceM);
     cfg.turnAnticipationMinAngleDeg = ini.getDouble("turn_anticipation_min_angle_deg", cfg.turnAnticipationMinAngleDeg);
@@ -326,6 +331,15 @@ AutoTaxiConfig loadAutoTaxiConfig(const std::string& iniPath, std::string& error
     cfg.fctlSecondaryMinTightBlend = ini.getDouble("fctl_secondary_min_tight_blend", cfg.fctlSecondaryMinTightBlend);
     cfg.fctlSecondaryFlapRatio = ini.getDouble("fctl_secondary_flap_ratio", cfg.fctlSecondaryFlapRatio);
     cfg.fctlSecondaryRestoreOnRelease = ini.getBool("fctl_secondary_restore_on_release", cfg.fctlSecondaryRestoreOnRelease);
+
+    cfg.runwayAlignmentMode = ini.getBool("runway_alignment_mode", cfg.runwayAlignmentMode);
+    cfg.runwayAlignCaptureDistanceM = ini.getDouble("runway_align_capture_distance_m", cfg.runwayAlignCaptureDistanceM);
+    cfg.runwayAlignFullDistanceM = ini.getDouble("runway_align_full_distance_m", cfg.runwayAlignFullDistanceM);
+    cfg.runwayAlignCenterGainDegPerM = ini.getDouble("runway_align_center_gain_deg_per_m", cfg.runwayAlignCenterGainDegPerM);
+    cfg.runwayAlignMaxInterceptDeg = ini.getDouble("runway_align_max_intercept_deg", cfg.runwayAlignMaxInterceptDeg);
+    cfg.runwayAlignSpeedKts = ini.getDouble("runway_align_speed_kts", cfg.runwayAlignSpeedKts);
+    cfg.runwayAlignCenterToleranceM = ini.getDouble("runway_align_center_tolerance_m", cfg.runwayAlignCenterToleranceM);
+    cfg.runwayAlignHeadingToleranceDeg = ini.getDouble("runway_align_heading_tolerance_deg", cfg.runwayAlignHeadingToleranceDeg);
 
     cfg.avoidRunwayEdges = ini.getBool("avoid_runway_edges", cfg.avoidRunwayEdges);
     cfg.runwayPenaltyM = ini.getDouble("runway_penalty_m", cfg.runwayPenaltyM);

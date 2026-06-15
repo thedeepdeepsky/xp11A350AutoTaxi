@@ -36,10 +36,10 @@ struct AutoTaxiConfig {
     double sameAirportPriorityToleranceM = 700.0;
 
     // Taxi motion model.
-    double taxiSpeedKts = 12.0;
+    double taxiSpeedKts = 25.0;
     double slowSpeedKts = 6.0;
     double finalSpeedKts = 3.0;
-    double sharpTurnSpeedKts = 3.0;
+    double sharpTurnSpeedKts = 4.0;
     double waypointRadiusM = 18.0;
     double finalStopRadiusM = 10.0;
 
@@ -175,14 +175,23 @@ struct AutoTaxiConfig {
     // This mode fades track-course out earlier, blends toward the outbound leg, and allows
     // a snap-to-tiller command before the nose reaches the intersection.
     bool earlyTurnTakeover = true;
-    double earlyTurnTakeoverAngleDeg = 55.0;
-    double earlyTurnTakeoverDistanceM = 185.0;
-    double earlyTurnFullDistanceM = 115.0;
-    double earlyTurnMinBlend = 0.30;
-    double earlyTurnHeadingBlend = 0.95;
+    double earlyTurnTakeoverAngleDeg = 50.0;
+    double earlyTurnTakeoverDistanceM = 240.0;
+    double earlyTurnFullDistanceM = 170.0;
+    double earlyTurnMinBlend = 0.55;
+    double earlyTurnHeadingBlend = 1.00;
     double earlyTurnTrackCourseFade = 1.0;
-    double earlyTurnSnapToRatio = 0.98;
-    double earlyTurnSnapMinTargetRatio = 0.82;
+    double earlyTurnSnapToRatio = 1.00;
+    double earlyTurnSnapMinTargetRatio = 0.98;
+
+    // Hard snap for large upcoming turns. When a 70-100 degree corner is close,
+    // do not ramp the steering command. Force full tiller immediately and let the
+    // one-pass rollout logic release it only near the outbound heading.
+    bool tightTurnForceFullSteer = true;
+    double tightTurnForceFullSteerAngleDeg = 65.0;
+    double tightTurnForceFullSteerDistanceM = 190.0;
+    double tightTurnForceFullSteerRatio = 1.00;
+    double tightTurnForceFullReleaseHeadingDeg = 24.0;
 
     // Corner anticipation makes the taxi controller behave more like an AP lateral mode:
     // it starts blending toward the next leg before the nose reaches the node, instead of
@@ -199,15 +208,15 @@ struct AutoTaxiConfig {
     // steering authority, and differential braking are also scheduled for a smaller radius.
     bool tightTurnMode = true;
     double tightTurnAngleDeg = 25.0;
-    double tightTurnTriggerDistanceM = 115.0;
-    double tightTurnLookaheadAfterApexM = 28.0;
-    double tightTurnMinLookaheadM = 20.0;
-    double tightTurnSpeedKts = 2.3;
-    double tightTurnSteerFullDeflectionDeg = 18.0;
-    double tightTurnSteerSmoothingPerSec = 14.0;
-    double tightTurnKpBoost = 1.95;
-    double tightTurnKdBoost = 1.25;
-    double tightTurnDifferentialBrakeMax = 0.22;
+    double tightTurnTriggerDistanceM = 220.0;
+    double tightTurnLookaheadAfterApexM = 18.0;
+    double tightTurnMinLookaheadM = 14.0;
+    double tightTurnSpeedKts = 3.0;
+    double tightTurnSteerFullDeflectionDeg = 10.0;
+    double tightTurnSteerSmoothingPerSec = 60.0;
+    double tightTurnKpBoost = 2.50;
+    double tightTurnKdBoost = 1.00;
+    double tightTurnDifferentialBrakeMax = 0.28;
     double tightTurnDifferentialBrakeMinKts = 0.5;
 
     // Steering response boost. The old rate limiter could take about a second to
@@ -216,28 +225,28 @@ struct AutoTaxiConfig {
     bool steerFastResponse = true;
     double steerFastResponseErrorDeg = 10.0;
     double steerFastResponseXteM = 2.5;
-    double steerFastResponseRatePerSec = 13.0;
+    double steerFastResponseRatePerSec = 60.0;
     bool tightTurnSnapSteer = true;
-    double tightTurnSnapBlend = 0.06;
-    double tightTurnSnapMinTargetRatio = 0.25;
-    double tightTurnSnapToRatio = 0.88;
+    double tightTurnSnapBlend = 0.0;
+    double tightTurnSnapMinTargetRatio = 0.98;
+    double tightTurnSnapToRatio = 1.00;
 
     // One-pass 70-100 degree cornering. This is intentionally aggressive at the
     // beginning of a 90-degree taxiway turn, then rolls out before the nose passes
     // the outbound leg heading so the aircraft does not overshoot and S-turn back.
     bool tightTurnOnePassMode = true;
     double tightTurnOnePassAngleDeg = 70.0;
-    double tightTurnHardSnapToRatio = 0.88;
-    double tightTurnHardSnapMinTargetRatio = 0.70;
-    double tightTurnRolloutHeadingDeg = 18.0;
-    double tightTurnRolloutGain = 1.35;
+    double tightTurnHardSnapToRatio = 1.00;
+    double tightTurnHardSnapMinTargetRatio = 0.98;
+    double tightTurnRolloutHeadingDeg = 24.0;
+    double tightTurnRolloutGain = 1.80;
     double tightTurnRolloutMinPidDeg = 3.0;
 
     double routeSegmentAdvanceAlong = 0.68;
     double routeSegmentScanAhead = 4.0;
 
     // Outputs.
-    double maxThrottle = 0.35;
+    double maxThrottle = 0.48;
     double creepThrottle = 0.18;       // Low-speed creep thrust when the first waypoint is not aligned.
     double breakawayThrottle = 0.38;   // Temporary thrust boost if the aircraft is armed but not moving.
     double stuckBoostSeconds = 2.0;
@@ -247,13 +256,13 @@ struct AutoTaxiConfig {
     // severity, terminal slowdown and tight-turn mode, then rate-limits the throttle.
     bool dynamicThrottleControl = true;
     double throttleIdle = 0.035;
-    double throttleTrim = 0.075;
-    double throttleMinMoving = 0.055;
-    double throttleSpeedKp = 0.040;          // throttle ratio per kt of speed error.
+    double throttleTrim = 0.110;
+    double throttleMinMoving = 0.070;
+    double throttleSpeedKp = 0.055;          // throttle ratio per kt of speed error.
     double throttleCaptureReduction = 0.35;  // reduce thrust during aggressive path capture.
     double throttleTurnReduction = 0.45;     // reduce thrust in tight turns.
     double throttleTerminalReduction = 0.60; // reduce thrust near final stop/hold-short.
-    double throttleIncreaseRatePerSec = 0.22;
+    double throttleIncreaseRatePerSec = 0.40;
     double throttleDecreaseRatePerSec = 0.55;
     double throttleOverspeedBrakeDeadbandKts = 0.6;
 
@@ -288,6 +297,17 @@ struct AutoTaxiConfig {
     double fctlSecondaryMinTightBlend = 0.20;
     double fctlSecondaryFlapRatio = 0.16;
     bool fctlSecondaryRestoreOnRelease = true;
+
+    // Runway destination line-up. If Destination is a runway, use the apt.dat runway
+    // endpoints to capture runway centreline and runway heading before declaring arrival.
+    bool runwayAlignmentMode = true;
+    double runwayAlignCaptureDistanceM = 420.0;
+    double runwayAlignFullDistanceM = 260.0;
+    double runwayAlignCenterGainDegPerM = 0.85;
+    double runwayAlignMaxInterceptDeg = 34.0;
+    double runwayAlignSpeedKts = 8.0;
+    double runwayAlignCenterToleranceM = 4.0;
+    double runwayAlignHeadingToleranceDeg = 6.0;
 
     // Routing safety.
     bool avoidRunwayEdges = true;
